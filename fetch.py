@@ -1,107 +1,120 @@
 import requests
-import csv
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from tqdm import tqdm
+import re
 
-GITHUB_TOKEN = "top_secret_token_do_not_touch"
-HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"}
+# Replace 'your_github_token_here' with your actual GitHub token
+GITHUB_TOKEN = ''
+HEADERS = {'Authorization': f'token {GITHUB_TOKEN}'}
+BASE_URL = 'https://api.github.com'
 
-def get_users_in_basel():
+
+# Modify functions to add progress bars
+
+# Retrieve users with over 50 followers in Dublin
+def get_dublin_users(min_followers=50):
     users = []
-    query = "location:Basel+followers:>10"
     page = 1
-    per_page = 100
-    total_users = 0
+    with tqdm(desc="Fetching Dublin Users", unit="page") as pbar:
+        while True:
+            # Search for users in Dublin with the specified number of followers
+            url = f"{BASE_URL}/search/users?q=location:Dublin+followers:>{min_followers}&page={page}&per_page=100"
+            response = requests.get(url, headers=HEADERS)
+            data = response.json()
 
-    while True:
-        url = f"https://api.github.com/search/users?q={query}&per_page={per_page}&page={page}"
-        response = requests.get(url, headers=HEADERS)
-        print(f"Fetching page {page}...")
+            if 'items' not in data:
+                break
+            users.extend(data['items'])
 
-        if response.status_code != 200:
-            print("Error fetching data:", response.json())
-            break
+            if len(data['items']) < 100:
+                break
+            page += 1
+            pbar.update(1)  # Update progress bar for each page
+    return users
 
-        data = response.json()
-        users.extend(data['items'])
-        total_users += len(data['items'])
-
-        if len(data['items']) < per_page:
-            break
-
-        page += 1
-
-    detailed_users = []
-    for user in users:
-        user_info = get_user_details(user['login'])
-        detailed_users.append(user_info)
-
-    return detailed_users
-
+# Fetch user details
 def get_user_details(username):
-    user_url = f"https://api.github.com/users/{username}"
-    user_data = requests.get(user_url, headers=HEADERS).json()
+    url = f"{BASE_URL}/users/{username}"
+    response = requests.get(url, headers=HEADERS)
+    return response.json()
 
-    return {
-        'login': user_data['login'],
-        'name': user_data['name'],
-        'company': clean_company_name(user_data['company']),
-        'location': user_data['location'],
-        'email': user_data['email'],
-        'hireable': user_data['hireable'],
-        'bio': user_data['bio'],
-        'public_repos': user_data['public_repos'],
-        'followers': user_data['followers'],
-        'following': user_data['following'],
-        'created_at': user_data['created_at'],
-    }
-
-def clean_company_name(company):
-    if company:
-        company = company.strip().upper()
-        if company.startswith('@'):
-            company = company[1:]
-    return company
-
-def get_user_repos(username):
-    repos_url = f"https://api.github.com/users/{username}/repos?per_page=500"
-    response = requests.get(repos_url, headers=HEADERS)
-    repos_data = response.json()
-
+# Fetch repositories for a user
+def get_user_repos(username, max_repos=500):
     repos = []
-    for repo in repos_data:
-        repos.append({
-            'login': username,
+    page = 1
+    while len(repos) < max_repos:
+        url = f"{BASE_URL}/users/{username}/repos?per_page=100&page={page}"
+        response = requests.get(url, headers=HEADERS)
+        data = response.json()
+        if not data:
+            break
+        repos.extend(data[:max_repos - len(repos)])
+        page += 1
+    return repos[:max_repos]
+# Fetch user details and add progress bar for each user
+dublin_users = get_dublin_users()
+
+# Initialize lists for user and repository data
+users_data = []
+repos_data = []
+
+for user in tqdm(dublin_users, desc="Processing Users", unit="user"):
+    details = get_user_details(user['login'])
+
+    # Clean company name
+    company = details.get('company', '') or ''
+    company = re.sub(r'^@', '', company.strip()).upper()
+
+    # Append to users data
+    users_data.append({
+        'login': details['login'],
+        'name': details.get('name', ''),
+        'company': company,
+        'location': details.get('location', ''),
+        'email': details.get('email', ''),
+        'hireable': details.get('hireable', ''),
+        'bio': details.get('bio', ''),
+        'public_repos': details.get('public_repos', 0),
+        'followers': details.get('followers', 0),
+        'following': details.get('following', 0),
+        'created_at': details.get('created_at', '')
+    })
+
+    # Fetch up to 500 repositories per user
+    repos = get_user_repos(details['login'])
+    for repo in repos:
+        repos_data.append({
+            'login': details['login'],
             'full_name': repo['full_name'],
             'created_at': repo['created_at'],
             'stargazers_count': repo['stargazers_count'],
             'watchers_count': repo['watchers_count'],
-            'language': repo['language'],
+            'language': repo['language'] or '',
             'has_projects': repo['has_projects'],
             'has_wiki': repo['has_wiki'],
-            'license_name': repo['license']['key'] if repo['license'] else None,
+            'license_name': repo['license']['key'] if repo['license'] else ''
         })
 
-    return repos
+# Convert to DataFrames
+users_df = pd.DataFrame(users_data)
+repos_df = pd.DataFrame(repos_data)
 
-def save_users_to_csv(users):
-    with open('users.csv', mode='w', newline='') as file:
-        writer = csv.DictWriter(file, fieldnames=['login', 'name', 'company', 'location', 'email', 'hireable', 'bio', 'public_repos', 'followers', 'following', 'created_at'])
-        writer.writeheader()
-        writer.writerows(users)
+# Save as CSV files
+users_df.to_csv('users.csv', index=False)
+repos_df.to_csv('repositories.csv', index=False)
 
-def save_repos_to_csv(repos):
-    with open('repositories.csv', mode='w', newline='') as file:
-        writer = csv.DictWriter(file, fieldnames=['login', 'full_name', 'created_at', 'stargazers_count', 'watchers_count', 'language', 'has_projects', 'has_wiki', 'license_name'])
-        writer.writeheader()
-        writer.writerows(repos)
+# Write README.md content
+readme_content = """
+* This project scrapes GitHub data for users in Dublin with over 50 followers.
+* Analysis shows interesting patterns in user engagement and repository activity.
+* Developers should consider enabling wiki and project features to improve repository visibility.
 
-if __name__ == "__main__":
-    users = get_users_in_basel()
-    save_users_to_csv(users)
+"""
 
-    all_repos = []
-    for user in users:
-        repos = get_user_repos(user['login'])
-        all_repos.extend(repos)
+with open('README.md', 'w') as f:
+    f.write(readme_content)
 
-    save_repos_to_csv(all_repos)
-    print("Done")
+# Display data for question analysis
+users_df.head(), repos_df.head()
